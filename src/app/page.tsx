@@ -12,8 +12,9 @@ type Task = {
   userPhoto?: string;
   title: string;
   penalty: number;
-  deadline: number | string; // 過去の文字列データにも対応するため型を拡張
+  deadline: number | string;
   isCompleted: boolean;
+  paymentStatus?: "unpaid" | "pending" | "paid";
   createdAt: number;
 };
 
@@ -21,19 +22,18 @@ export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [globalTasks, setGlobalTasks] = useState<Task[]>([]);
   const [viewMode, setViewMode] = useState<"personal" | "global">("personal");
+  
+  // ★新機能: 選択したユーザーのIDを保持するステート
+  const [selectedFilterUserId, setSelectedFilterUserId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
   const [penalty, setPenalty] = useState(500);
   const [user, setUser] = useState<User | null>(null);
   
-  // 現在時刻を保持するステート（カウントダウン用）
   const [now, setNow] = useState(Date.now());
 
-  // 1秒ごとに現在時刻を更新するタイマー
   useEffect(() => {
-    const timer = setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
+    const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
 
@@ -47,7 +47,7 @@ export default function Home() {
           setTasks(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as Task[]);
         });
 
-        const globalQuery = query(collection(db, "tasks"), orderBy("createdAt", "desc"), limit(30));
+        const globalQuery = query(collection(db, "tasks"), orderBy("createdAt", "desc"), limit(50)); // 少し多めに取得
         const unsubscribeGlobal = onSnapshot(globalQuery, (snapshot) => {
           setGlobalTasks(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as Task[]);
         });
@@ -85,9 +85,9 @@ export default function Home() {
         userPhoto: user.photoURL || "",
         title,
         penalty,
-        // 期限を24時間後の「数値（ミリ秒）」として保存するように変更
         deadline: Date.now() + 24 * 60 * 60 * 1000, 
         isCompleted: false,
+        paymentStatus: "unpaid",
         createdAt: Date.now(),
       });
       setTitle("");
@@ -97,48 +97,48 @@ export default function Home() {
   };
 
   const toggleTask = async (id: string, currentStatus: boolean) => {
-    try {
-      await updateDoc(doc(db, "tasks", id), { isCompleted: !currentStatus });
-    } catch (error) {
-      console.error("タスク更新エラー:", error);
-    }
+    await updateDoc(doc(db, "tasks", id), { isCompleted: !currentStatus });
   };
 
   const deleteTask = async (id: string) => {
-    try {
-      await deleteDoc(doc(db, "tasks", id));
-    } catch (error) {
-      console.error("タスク削除エラー:", error);
-    }
+    await deleteDoc(doc(db, "tasks", id));
   };
 
-  // 残り時間を計算して整形する関数
-  const getRemainingTimeDisplay = (deadline: number | string, isCompleted: boolean) => {
-    if (isCompleted) return { text: "完了済み", color: "text-zinc-500" };
+  const reportPayment = async (id: string) => {
+    await updateDoc(doc(db, "tasks", id), { paymentStatus: "pending" });
+  };
 
-    // 過去の文字列データだった場合は数値に変換
-    const targetTime = typeof deadline === "string" ? new Date(deadline).getTime() : deadline;
-    if (isNaN(targetTime)) return { text: "期限不明", color: "text-zinc-500" };
+  const approvePayment = async (id: string) => {
+    await updateDoc(doc(db, "tasks", id), { paymentStatus: "paid" });
+  };
 
+  const getTaskStatusInfo = (task: Task) => {
+    if (task.paymentStatus === "paid") return { text: "💸 支払い完了（承認済）", color: "text-green-600 font-bold", status: "paid" };
+    if (task.paymentStatus === "pending") return { text: "⏳ 支払い承認待ち", color: "text-orange-500 font-bold animate-pulse", status: "pending" };
+    if (task.isCompleted) return { text: "🎉 達成済み", color: "text-zinc-500", status: "completed" };
+
+    const targetTime = typeof task.deadline === "string" ? new Date(task.deadline).getTime() : task.deadline;
     const diff = targetTime - now;
 
     if (diff <= 0) {
-      return { text: "⚠️ 期限切れ (ペナルティ執行)", color: "text-red-600 font-bold animate-pulse" };
+      return { text: "⚠️ 期限切れ (未払い)", color: "text-red-600 font-bold", status: "failed" };
     }
 
     const hours = Math.floor(diff / (1000 * 60 * 60));
-    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-    const seconds = Math.floor((diff % (1000 * 60)) / 1000);
-
-    // ゼロ埋めして時計のように表示 (例: 05:09)
-    const formattedMinutes = minutes.toString().padStart(2, "0");
-    const formattedSeconds = seconds.toString().padStart(2, "0");
-
-    // 残り時間が1時間を切ったら文字を赤くする
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60)).toString().padStart(2, "0");
+    const seconds = Math.floor((diff % (1000 * 60)) / 1000).toString().padStart(2, "0");
     const color = diff < 1000 * 60 * 60 ? "text-red-500 font-bold" : "text-blue-500 font-medium";
 
-    return { text: `残り ${hours}:${formattedMinutes}:${formattedSeconds}`, color };
+    return { text: `残り ${hours}:${minutes}:${seconds}`, color, status: "active" };
   };
+
+  const totalPenaltyAmount = tasks.reduce((sum, task) => {
+    const statusInfo = getTaskStatusInfo(task);
+    if ((statusInfo.status === "failed" || statusInfo.status === "pending") && task.paymentStatus !== "paid") {
+      return sum + task.penalty;
+    }
+    return sum;
+  }, 0);
 
   if (!user) {
     return (
@@ -151,7 +151,23 @@ export default function Home() {
     );
   }
 
-  const displayTasks = viewMode === "personal" ? tasks : globalTasks;
+  // ★新機能: グローバルタスクからユニークなユーザー一覧を抽出
+  const uniqueUsersMap = new Map();
+  globalTasks.forEach(task => {
+    if (!uniqueUsersMap.has(task.userId)) {
+      uniqueUsersMap.set(task.userId, {
+        userId: task.userId,
+        userName: task.userName || "名無しユーザー",
+        userPhoto: task.userPhoto
+      });
+    }
+  });
+  const activeUsers = Array.from(uniqueUsersMap.values());
+
+  // ★新機能: フィルターの適用
+  const displayTasks = viewMode === "personal" 
+    ? tasks 
+    : (selectedFilterUserId ? globalTasks.filter(t => t.userId === selectedFilterUserId) : globalTasks);
 
   return (
     <div className="min-h-screen bg-zinc-50 p-8 dark:bg-black text-black dark:text-white font-sans">
@@ -163,6 +179,13 @@ export default function Home() {
             <button onClick={handleLogout} className="text-sm px-3 py-1.5 border border-zinc-300 dark:border-zinc-700 rounded-md hover:bg-zinc-100 dark:hover:bg-zinc-800 transition">ログアウト</button>
           </div>
         </header>
+
+        <div className="bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900 rounded-xl p-6 text-center">
+          <h2 className="text-red-800 dark:text-red-400 font-bold text-sm mb-1">あなたが支払うべき罰金合計</h2>
+          <p className="text-4xl font-mono font-black text-red-600 dark:text-red-500">
+            ¥ {totalPenaltyAmount.toLocaleString()}
+          </p>
+        </div>
 
         <form onSubmit={addTask} className="flex flex-col gap-4 p-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800">
           <div>
@@ -178,24 +201,58 @@ export default function Home() {
 
         <div className="space-y-4">
           <div className="flex gap-2 bg-zinc-200 dark:bg-zinc-800 p-1 rounded-lg w-fit">
-            <button onClick={() => setViewMode("personal")} className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "personal" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}>
+            <button 
+              onClick={() => { setViewMode("personal"); setSelectedFilterUserId(null); }} 
+              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "personal" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
+            >
               自分のタスク
             </button>
-            <button onClick={() => setViewMode("global")} className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "global" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}>
+            <button 
+              onClick={() => setViewMode("global")} 
+              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "global" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
+            >
               みんなのタスク
             </button>
           </div>
 
+          {/* ★新機能: ユーザー絞り込みフィルターUI（みんなのタスク選択時のみ表示） */}
+          {viewMode === "global" && activeUsers.length > 0 && (
+            <div className="flex gap-3 overflow-x-auto py-2 scrollbar-hide">
+              <button
+                onClick={() => setSelectedFilterUserId(null)}
+                className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition border ${selectedFilterUserId === null ? "bg-black text-white dark:bg-white dark:text-black" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700"}`}
+              >
+                全員表示
+              </button>
+              {activeUsers.map(u => (
+                <button
+                  key={u.userId}
+                  onClick={() => setSelectedFilterUserId(u.userId)}
+                  className={`flex items-center gap-1.5 flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition border ${selectedFilterUserId === u.userId ? "bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-300" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700"}`}
+                >
+                  {u.userPhoto ? (
+                    <img src={u.userPhoto} alt="User" className="w-4 h-4 rounded-full" />
+                  ) : (
+                    <div className="w-4 h-4 rounded-full bg-zinc-300 dark:bg-zinc-700"></div>
+                  )}
+                  {u.userName.split(" ")[0] /* 名前が長い場合は短縮 */}
+                </button>
+              ))}
+            </div>
+          )}
+
           {displayTasks.length === 0 ? (
-            <p className="text-zinc-500 text-sm italic text-center py-8">タスクはありません。</p>
+            <p className="text-zinc-500 text-sm italic text-center py-8">
+              {selectedFilterUserId ? "このユーザーのタスクはありません。" : "タスクはありません。"}
+            </p>
           ) : (
             <div className="grid gap-3">
               {displayTasks.map((task) => {
-                // ここで残り時間と色を計算
-                const timeDisplay = getRemainingTimeDisplay(task.deadline, task.isCompleted);
+                const statusInfo = getTaskStatusInfo(task);
+                const isOwner = task.userId === user.uid;
 
                 return (
-                  <div key={task.id} className={`p-4 rounded-lg border flex justify-between items-center transition-all ${task.isCompleted ? "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 opacity-60" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm"}`}>
+                  <div key={task.id} className={`p-4 rounded-lg border flex justify-between items-center transition-all ${task.isCompleted || statusInfo.status === "paid" ? "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 opacity-60" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm"}`}>
                     
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-2">
@@ -213,24 +270,38 @@ export default function Home() {
                         <span className="text-sm font-mono font-bold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 px-2 py-0.5 rounded">
                           Penalty: ¥{task.penalty}
                         </span>
-                        {/* カウントダウン表示部分 */}
-                        <span className={`text-sm font-mono ${timeDisplay.color}`}>
-                          ⏱ {timeDisplay.text}
+                        <span className={`text-sm font-mono ${statusInfo.color}`}>
+                          {statusInfo.text}
                         </span>
                       </div>
                     </div>
 
-                    {task.userId === user.uid && (
-                      <div className="flex gap-2">
-                        <button onClick={() => toggleTask(task.id, task.isCompleted)} className={`text-xs px-3 py-1.5 rounded-full border transition font-bold ${task.isCompleted ? "bg-green-500 border-green-500 text-white" : "hover:bg-zinc-100 dark:hover:bg-zinc-800 border-zinc-300 dark:border-zinc-700"}`}>
-                          {task.isCompleted ? "✓ 完了" : "完了にする"}
+                    <div className="flex gap-2">
+                      {isOwner && statusInfo.status === "active" && (
+                        <>
+                          <button onClick={() => toggleTask(task.id, task.isCompleted)} className="text-xs px-3 py-1.5 rounded-full border border-zinc-300 hover:bg-zinc-100 font-bold transition">完了にする</button>
+                          <button onClick={() => deleteTask(task.id)} className="text-xs px-2 py-1.5 text-zinc-400 hover:text-red-500 transition">削除</button>
+                        </>
+                      )}
+                      {isOwner && statusInfo.status === "completed" && (
+                        <button onClick={() => toggleTask(task.id, task.isCompleted)} className="text-xs px-3 py-1.5 rounded-full border bg-green-500 border-green-500 text-white font-bold transition">✓ 完了</button>
+                      )}
+                      {isOwner && statusInfo.status === "failed" && (
+                        <button onClick={() => reportPayment(task.id)} className="text-xs px-3 py-1.5 rounded-full border bg-black text-white dark:bg-white dark:text-black font-bold transition hover:opacity-80">
+                          💰 支払いを報告
                         </button>
-                        <button onClick={() => deleteTask(task.id)} className="text-xs px-2 py-1.5 text-zinc-400 hover:text-red-500 transition">削除</button>
-                      </div>
-                    )}
-                    {task.userId !== user.uid && task.isCompleted && (
-                       <span className="text-xs px-3 py-1.5 rounded-full font-bold bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">達成済</span>
-                    )}
+                      )}
+
+                      {!isOwner && statusInfo.status === "pending" && (
+                        <button onClick={() => approvePayment(task.id)} className="text-xs px-4 py-2 rounded-full border bg-blue-600 border-blue-600 text-white font-bold transition hover:opacity-80 shadow-md">
+                          ✅ 支払いを承認する
+                        </button>
+                      )}
+                      
+                      {statusInfo.status === "paid" && (
+                        <span className="text-xs px-3 py-1.5 rounded-full font-bold bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 border border-green-200 dark:border-green-800">決済済</span>
+                      )}
+                    </div>
                   </div>
                 );
               })}
