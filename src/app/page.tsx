@@ -2,59 +2,56 @@
 
 import { useState, useEffect } from "react";
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from "firebase/auth";
-// limit を追加でインポート
 import { collection, addDoc, query, where, onSnapshot, updateDoc, doc, deleteDoc, orderBy, limit } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
 
 type Task = {
   id: string;
   userId: string;
-  userName?: string;  // 追加: ユーザー名
-  userPhoto?: string; // 追加: ユーザーアイコン
+  userName?: string;
+  userPhoto?: string;
   title: string;
   penalty: number;
-  deadline: string;
+  deadline: number | string; // 過去の文字列データにも対応するため型を拡張
   isCompleted: boolean;
   createdAt: number;
 };
 
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [globalTasks, setGlobalTasks] = useState<Task[]>([]); // みんなのタスク用ステート
-  const [viewMode, setViewMode] = useState<"personal" | "global">("personal"); // 表示切り替え用ステート
+  const [globalTasks, setGlobalTasks] = useState<Task[]>([]);
+  const [viewMode, setViewMode] = useState<"personal" | "global">("personal");
 
   const [title, setTitle] = useState("");
   const [penalty, setPenalty] = useState(500);
   const [user, setUser] = useState<User | null>(null);
+  
+  // 現在時刻を保持するステート（カウントダウン用）
+  const [now, setNow] = useState(Date.now());
+
+  // 1秒ごとに現在時刻を更新するタイマー
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
 
       if (currentUser) {
-        // 1. 自分のタスクを取得するクエリ
-        const personalQuery = query(
-          collection(db, "tasks"),
-          where("userId", "==", currentUser.uid),
-          orderBy("createdAt", "desc")
-        );
-
+        const personalQuery = query(collection(db, "tasks"), where("userId", "==", currentUser.uid), orderBy("createdAt", "desc"));
         const unsubscribePersonal = onSnapshot(personalQuery, (snapshot) => {
           setTasks(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as Task[]);
         });
 
-        // 2. みんなのタスク（全ユーザーの最新30件）を取得するクエリ
-        const globalQuery = query(
-          collection(db, "tasks"),
-          orderBy("createdAt", "desc"),
-          limit(30)
-        );
-
+        const globalQuery = query(collection(db, "tasks"), orderBy("createdAt", "desc"), limit(30));
         const unsubscribeGlobal = onSnapshot(globalQuery, (snapshot) => {
           setGlobalTasks(snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as Task[]);
         });
 
-        // クリーンアップ関数
         return () => {
           unsubscribePersonal();
           unsubscribeGlobal();
@@ -84,11 +81,12 @@ export default function Home() {
     try {
       await addDoc(collection(db, "tasks"), {
         userId: user.uid,
-        userName: user.displayName || "匿名ユーザー", // 名前を保存
-        userPhoto: user.photoURL || "",             // アイコンを保存
+        userName: user.displayName || "匿名ユーザー",
+        userPhoto: user.photoURL || "",
         title,
         penalty,
-        deadline: new Date(Date.now() + 24 * 60 * 60 * 1000).toLocaleString(),
+        // 期限を24時間後の「数値（ミリ秒）」として保存するように変更
+        deadline: Date.now() + 24 * 60 * 60 * 1000, 
         isCompleted: false,
         createdAt: Date.now(),
       });
@@ -114,6 +112,34 @@ export default function Home() {
     }
   };
 
+  // 残り時間を計算して整形する関数
+  const getRemainingTimeDisplay = (deadline: number | string, isCompleted: boolean) => {
+    if (isCompleted) return { text: "完了済み", color: "text-zinc-500" };
+
+    // 過去の文字列データだった場合は数値に変換
+    const targetTime = typeof deadline === "string" ? new Date(deadline).getTime() : deadline;
+    if (isNaN(targetTime)) return { text: "期限不明", color: "text-zinc-500" };
+
+    const diff = targetTime - now;
+
+    if (diff <= 0) {
+      return { text: "⚠️ 期限切れ (ペナルティ執行)", color: "text-red-600 font-bold animate-pulse" };
+    }
+
+    const hours = Math.floor(diff / (1000 * 60 * 60));
+    const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((diff % (1000 * 60)) / 1000);
+
+    // ゼロ埋めして時計のように表示 (例: 05:09)
+    const formattedMinutes = minutes.toString().padStart(2, "0");
+    const formattedSeconds = seconds.toString().padStart(2, "0");
+
+    // 残り時間が1時間を切ったら文字を赤くする
+    const color = diff < 1000 * 60 * 60 ? "text-red-500 font-bold" : "text-blue-500 font-medium";
+
+    return { text: `残り ${hours}:${formattedMinutes}:${formattedSeconds}`, color };
+  };
+
   if (!user) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-50 dark:bg-black text-black dark:text-white">
@@ -125,7 +151,6 @@ export default function Home() {
     );
   }
 
-  // 表示するリストを切り替え
   const displayTasks = viewMode === "personal" ? tasks : globalTasks;
 
   return (
@@ -139,7 +164,6 @@ export default function Home() {
           </div>
         </header>
 
-        {/* タスク入力フォーム */}
         <form onSubmit={addTask} className="flex flex-col gap-4 p-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800">
           <div>
             <label className="block text-sm font-medium mb-1">達成する目標</label>
@@ -153,18 +177,11 @@ export default function Home() {
         </form>
 
         <div className="space-y-4">
-          {/* タブ切り替えボタン */}
           <div className="flex gap-2 bg-zinc-200 dark:bg-zinc-800 p-1 rounded-lg w-fit">
-            <button 
-              onClick={() => setViewMode("personal")}
-              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "personal" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
-            >
+            <button onClick={() => setViewMode("personal")} className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "personal" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}>
               自分のタスク
             </button>
-            <button 
-              onClick={() => setViewMode("global")}
-              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "global" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
-            >
+            <button onClick={() => setViewMode("global")} className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "global" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}>
               みんなのタスク
             </button>
           </div>
@@ -173,43 +190,50 @@ export default function Home() {
             <p className="text-zinc-500 text-sm italic text-center py-8">タスクはありません。</p>
           ) : (
             <div className="grid gap-3">
-              {displayTasks.map((task) => (
-                <div key={task.id} className={`p-4 rounded-lg border flex justify-between items-center transition-all ${task.isCompleted ? "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 opacity-60" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm"}`}>
-                  
-                  <div className="flex-1">
-                    {/* ユーザー情報の表示 (みんなのタスク用) */}
-                    <div className="flex items-center gap-2 mb-2">
-                      {task.userPhoto ? (
-                        <img src={task.userPhoto} alt="User" className="w-5 h-5 rounded-full" />
-                      ) : (
-                        <div className="w-5 h-5 rounded-full bg-zinc-300 dark:bg-zinc-700"></div>
-                      )}
-                      <span className="text-xs text-zinc-500 font-medium">{task.userName || "名無しユーザー"}</span>
+              {displayTasks.map((task) => {
+                // ここで残り時間と色を計算
+                const timeDisplay = getRemainingTimeDisplay(task.deadline, task.isCompleted);
+
+                return (
+                  <div key={task.id} className={`p-4 rounded-lg border flex justify-between items-center transition-all ${task.isCompleted ? "bg-zinc-100 dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 opacity-60" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 shadow-sm"}`}>
+                    
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-2">
+                        {task.userPhoto ? (
+                          <img src={task.userPhoto} alt="User" className="w-5 h-5 rounded-full" />
+                        ) : (
+                          <div className="w-5 h-5 rounded-full bg-zinc-300 dark:bg-zinc-700"></div>
+                        )}
+                        <span className="text-xs text-zinc-500 font-medium">{task.userName || "名無しユーザー"}</span>
+                      </div>
+
+                      <p className={`font-medium ${task.isCompleted ? "line-through text-zinc-500" : ""}`}>{task.title}</p>
+                      
+                      <div className="flex items-center gap-4 mt-2">
+                        <span className="text-sm font-mono font-bold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 px-2 py-0.5 rounded">
+                          Penalty: ¥{task.penalty}
+                        </span>
+                        {/* カウントダウン表示部分 */}
+                        <span className={`text-sm font-mono ${timeDisplay.color}`}>
+                          ⏱ {timeDisplay.text}
+                        </span>
+                      </div>
                     </div>
 
-                    <p className={`font-medium ${task.isCompleted ? "line-through text-zinc-500" : ""}`}>{task.title}</p>
-                    <div className="flex gap-3 mt-1">
-                      <span className="text-xs text-red-500 font-mono font-bold">Penalty: ¥{task.penalty}</span>
-                      <span className="text-xs text-zinc-400 font-mono">Limit: {task.deadline}</span>
-                    </div>
+                    {task.userId === user.uid && (
+                      <div className="flex gap-2">
+                        <button onClick={() => toggleTask(task.id, task.isCompleted)} className={`text-xs px-3 py-1.5 rounded-full border transition font-bold ${task.isCompleted ? "bg-green-500 border-green-500 text-white" : "hover:bg-zinc-100 dark:hover:bg-zinc-800 border-zinc-300 dark:border-zinc-700"}`}>
+                          {task.isCompleted ? "✓ 完了" : "完了にする"}
+                        </button>
+                        <button onClick={() => deleteTask(task.id)} className="text-xs px-2 py-1.5 text-zinc-400 hover:text-red-500 transition">削除</button>
+                      </div>
+                    )}
+                    {task.userId !== user.uid && task.isCompleted && (
+                       <span className="text-xs px-3 py-1.5 rounded-full font-bold bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">達成済</span>
+                    )}
                   </div>
-
-                  {/* 完了・削除ボタン (自分のタスクの時だけ操作可能にする) */}
-                  {task.userId === user.uid && (
-                    <div className="flex gap-2">
-                      <button onClick={() => toggleTask(task.id, task.isCompleted)} className={`text-xs px-3 py-1.5 rounded-full border transition font-bold ${task.isCompleted ? "bg-green-500 border-green-500 text-white" : "hover:bg-zinc-100 dark:hover:bg-zinc-800 border-zinc-300 dark:border-zinc-700"}`}>
-                        {task.isCompleted ? "✓ 完了" : "完了にする"}
-                      </button>
-                      <button onClick={() => deleteTask(task.id)} className="text-xs px-2 py-1.5 text-zinc-400 hover:text-red-500 transition">削除</button>
-                    </div>
-                  )}
-                  {/* 他人のタスクの場合はステータスだけ表示 */}
-                  {task.userId !== user.uid && task.isCompleted && (
-                     <span className="text-xs px-3 py-1.5 rounded-full font-bold bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">達成済</span>
-                  )}
-
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
