@@ -24,3 +24,19 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* カレンダーのカスタマイズ例 */
+.react-calendar {
+  width: 100% !important;
+  background: transparent !important;
+  border: none !important;
+  font-family: inherit !important;
+}
+.react-calendar__tile--active {
+  background: #000 !important; /* ダークモードなら #fff */
+  border-radius: 8px;
+}
+.react-calendar__tile:hover {
+  background: #f4f4f5 !important;
+  border-radius: 8px;
+}

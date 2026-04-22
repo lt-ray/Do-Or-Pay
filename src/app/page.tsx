@@ -4,6 +4,9 @@ import { useState, useEffect } from "react";
 import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from "firebase/auth";
 import { collection, addDoc, query, where, onSnapshot, updateDoc, doc, deleteDoc, orderBy, limit } from "firebase/firestore";
 import { auth, db } from "../lib/firebase";
+// カレンダー用のインポート（ファイルの冒頭に追加）
+import Calendar from 'react-calendar';
+import 'react-calendar/dist/Calendar.css';
 
 type Task = {
   id: string;
@@ -11,9 +14,10 @@ type Task = {
   userName?: string;
   userPhoto?: string;
   title: string;
-  penalty: number;
+  importance: number;
   deadline: number | string;
   isCompleted: boolean;
+  completedAt?: number | null;
   paymentStatus?: "unpaid" | "pending" | "paid";
   createdAt: number;
 };
@@ -21,16 +25,18 @@ type Task = {
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [globalTasks, setGlobalTasks] = useState<Task[]>([]);
-  const [viewMode, setViewMode] = useState<"personal" | "global">("personal");
-  
+  const [viewMode, setViewMode] = useState<"tasks" | "calendar"| "stats">("tasks");
+
   // ★新機能: 選択したユーザーのIDを保持するステート
   const [selectedFilterUserId, setSelectedFilterUserId] = useState<string | null>(null);
 
   const [title, setTitle] = useState("");
-  const [penalty, setPenalty] = useState(500);
+  const [importance, setImportance] = useState(3); // 初期値は星3つ
+  const [deadlineInput, setDeadlineInput] = useState(""); // ユーザーが入力する期限用
   const [user, setUser] = useState<User | null>(null);
   
   const [now, setNow] = useState(Date.now());
+  const [selectedDate, setSelectedDate] = useState<Date | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -84,8 +90,8 @@ export default function Home() {
         userName: user.displayName || "匿名ユーザー",
         userPhoto: user.photoURL || "",
         title,
-        penalty,
-        deadline: Date.now() + 24 * 60 * 60 * 1000, 
+        importance,
+        deadline: new Date(deadlineInput).getTime(), 
         isCompleted: false,
         paymentStatus: "unpaid",
         createdAt: Date.now(),
@@ -97,19 +103,34 @@ export default function Home() {
   };
 
   const toggleTask = async (id: string, currentStatus: boolean) => {
-    await updateDoc(doc(db, "tasks", id), { isCompleted: !currentStatus });
+    const isNowCompleted = !currentStatus;
+    await updateDoc(doc(db, "tasks", id), { 
+      isCompleted: isNowCompleted,
+      // 完了した時は現在時刻を、未完了に戻した時は null をセット
+      completedAt: isNowCompleted ? Date.now() : null 
+    });
   };
 
   const deleteTask = async (id: string) => {
     await deleteDoc(doc(db, "tasks", id));
   };
 
-  const reportPayment = async (id: string) => {
-    await updateDoc(doc(db, "tasks", id), { paymentStatus: "pending" });
+  // 1. 再スケジュール（期限をリセットして更新）
+  const rescheduleTask = async (id: string) => {
+    const newDeadline = Date.now() + 24 * 60 * 60 * 1000; // とりあえず24時間延長の例
+    // もしユーザーにその場で選ばせたい場合は、入力欄を出す処理に繋げます
+    await updateDoc(doc(db, "tasks", id), {
+      deadline: newDeadline,
+      isCompleted: false,
+      createdAt: Date.now(), // 並び順を最新にするため
+    });
   };
 
-  const approvePayment = async (id: string) => {
-    await updateDoc(doc(db, "tasks", id), { paymentStatus: "paid" });
+  // 2. キャンセル（タスクを削除）
+  const cancelTask = async (id: string) => {
+    if (confirm("このタスクを諦めて削除しますか？")) {
+      await deleteDoc(doc(db, "tasks", id));
+    }
   };
 
   const getTaskStatusInfo = (task: Task) => {
@@ -121,7 +142,7 @@ export default function Home() {
     const diff = targetTime - now;
 
     if (diff <= 0) {
-      return { text: "⚠️ 期限切れ (未払い)", color: "text-red-600 font-bold", status: "failed" };
+      return { text: "⚠️ 期限切れ", color: "text-red-600 font-bold", status: "failed" };
     }
 
     const hours = Math.floor(diff / (1000 * 60 * 60));
@@ -132,24 +153,21 @@ export default function Home() {
     return { text: `残り ${hours}:${minutes}:${seconds}`, color, status: "active" };
   };
 
-  const totalPenaltyAmount = tasks.reduce((sum, task) => {
-    const statusInfo = getTaskStatusInfo(task);
-    if ((statusInfo.status === "failed" || statusInfo.status === "pending") && task.paymentStatus !== "paid") {
-      return sum + task.penalty;
-    }
-    return sum;
-  }, 0);
+  // 合計スコア（未達成タスクの重要度合計）を計算
+  const totalImportanceScore = tasks
+    .filter(t => !t.isCompleted)
+    .reduce((sum, task) => sum + (task.importance || 0), 0);
 
-  if (!user) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-50 dark:bg-black text-black dark:text-white">
-        <h1 className="text-4xl font-bold mb-4 tracking-tight">Do-Or-Pay</h1>
-        <button onClick={handleLogin} className="bg-black dark:bg-white dark:text-black text-white px-6 py-3 rounded-full font-bold hover:opacity-80 transition">
-          Googleでログインして始める
-        </button>
-      </div>
-    );
-  }
+    if (!user) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-zinc-50 dark:bg-black text-black dark:text-white">
+          <h1 className="text-4xl font-bold mb-4 tracking-tight">Do-Or-Pay</h1>
+          <button onClick={handleLogin} className="bg-black dark:bg-white dark:text-black text-white px-6 py-3 rounded-full font-bold hover:opacity-80 transition">
+            Googleでログインして始める
+          </button>
+        </div>
+      );
+    }
 
   // ★新機能: グローバルタスクからユニークなユーザー一覧を抽出
   const uniqueUsersMap = new Map();
@@ -165,9 +183,196 @@ export default function Home() {
   const activeUsers = Array.from(uniqueUsersMap.values());
 
   // ★新機能: フィルターの適用
-  const displayTasks = viewMode === "personal" 
-    ? tasks 
-    : (selectedFilterUserId ? globalTasks.filter(t => t.userId === selectedFilterUserId) : globalTasks);
+  // フィルターの適用
+const displayTasks = (
+    // 1. まず「誰のタスクを表示するか」で絞り込む
+    selectedFilterUserId 
+      ? globalTasks.filter(t => t.userId === selectedFilterUserId) 
+      : globalTasks
+  ).filter(task => {
+    // 2. 次に「24時間以内に完了したか、あるいは未完了か」で絞り込む
+    
+    // 未完了のタスクは常に表示
+    if (!task.isCompleted) return true;
+
+    // 以前のデータで completedAt がない場合は、消えなくなってしまうのを防ぐため表示
+    if (!task.completedAt) return true;
+
+    // 24時間をミリ秒で計算
+    const hours24 = 86400000; 
+    
+    // 完了した時刻から現在までが24時間以内であれば表示、それ以上なら非表示
+    return now - (task.completedAt as number) < hours24;
+  });
+
+  const renderCalendarView = () => {
+    // ★1. 修正：カレンダーの表示対象ユーザーを判定（統計タブと同じロジック）
+    const targetTasks = selectedFilterUserId 
+      ? globalTasks.filter(t => t.userId === selectedFilterUserId) 
+      : tasks;
+
+    // ★2. 修正：選択された日のタスク抽出ロジック（ハイブリッド方式）
+    const selectedDayTasks = selectedDate 
+      ? targetTasks.filter(t => {
+          const targetDate = t.isCompleted && t.completedAt 
+            ? new Date(t.completedAt)  // 完了済みなら完了日
+            : new Date(t.deadline);    // 未完了なら締切日
+          
+          return (
+            targetDate.getFullYear() === selectedDate.getFullYear() &&
+            targetDate.getMonth() === selectedDate.getMonth() &&
+            targetDate.getDate() === selectedDate.getDate()
+          );
+        })
+      : [];
+
+    return (
+      <div className="space-y-6">
+        <div className="bg-white dark:bg-zinc-900 p-6 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800">
+          <h2 className="text-xl font-bold mb-4">アクティビティログ</h2>
+          <Calendar
+            className="w-full border-none font-sans"
+            onClickDay={(value) => setSelectedDate(value)} // ★追加：クリックで日付をセット
+            tileContent={({ date, view }) => {
+              if (view !== 'month') return null;
+              // ★3. 修正：カレンダー上のドット表示ロジック（ハイブリッド方式）
+              const dayTasks = targetTasks.filter(t => {
+                const targetDate = t.isCompleted && t.completedAt 
+                  ? new Date(t.completedAt)  // 完了済みなら完了日
+                  : new Date(t.deadline);    // 未完了なら締切日
+
+                return (
+                  targetDate.getFullYear() === date.getFullYear() &&
+                  targetDate.getMonth() === date.getMonth() &&
+                  targetDate.getDate() === date.getDate()
+                );
+              });
+              if (dayTasks.length === 0) return null;
+              return (
+                <div className="flex justify-center gap-1 mt-1">
+                  {dayTasks.map(t => (
+                    <div key={t.id} className={`w-1.5 h-1.5 rounded-full ${t.isCompleted ? 'bg-green-500' : 'bg-red-500'}`} />
+                  ))}
+                </div>
+              );
+            }}
+          />
+        </div>
+
+        {/* ★追加：選択された日の詳細表示エリア */}
+        {selectedDate && (
+          <div className="bg-white dark:bg-zinc-900 p-6 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800 animate-in fade-in slide-in-from-top-4">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-lg">
+                {selectedDate.toLocaleDateString('ja-JP')} のタスク
+              </h3>
+              <button 
+                onClick={() => setSelectedDate(null)}
+                className="text-xs text-zinc-500 hover:text-black dark:hover:text-white"
+              >
+                閉じる
+              </button>
+            </div>
+
+            {selectedDayTasks.length === 0 ? (
+              <p className="text-sm text-zinc-500 italic">この日のタスクはありません。</p>
+            ) : (
+              <div className="space-y-3">
+                {selectedDayTasks.map(task => (
+                  <div key={task.id} className="flex items-center justify-between p-3 bg-zinc-50 dark:bg-zinc-800 rounded-lg">
+                    <div>
+                      <p className={`text-sm font-medium ${task.isCompleted ? 'line-through text-zinc-400' : ''}`}>
+                        {task.title}
+                      </p>
+                      <div className="flex gap-2 mt-1">
+                        <span className="text-xs text-zinc-500">{"⭐️".repeat(task.importance)}</span>
+                        <span className={`text-xs font-bold ${task.isCompleted ? 'text-green-600' : 'text-red-600'}`}>
+                          {task.isCompleted ? "達成済" : "未達成"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderStatsView = () => {
+    // 現在フィルターされている対象のタスク（全履歴）を使用
+    const targetTasks = selectedFilterUserId 
+      ? globalTasks.filter(t => t.userId === selectedFilterUserId) 
+      : tasks; // 全員表示の時は自分の統計を出すのが自然
+
+    const completedTasks = targetTasks.filter(t => t.isCompleted);
+    const totalStars = completedTasks.reduce((sum, t) => {
+      // importance が存在しない、または数字でない場合に 0 を使う
+      const val = typeof t.importance === 'number' ? t.importance : 0;
+      return sum + val;
+    }, 0);
+    const totalCount = targetTasks.length;
+    const achievementRate = totalCount > 0 ? Math.round((completedTasks.length / totalCount) * 100) : 0;
+
+    // 重要度別の統計
+    const importanceStats = [1, 2, 3, 4, 5].map(level => {
+      const levelTasks = targetTasks.filter(t => (t.importance || 0) === level); // || 0 を追加
+      const levelCompleted = levelTasks.filter(t => t.isCompleted);
+      const rate = levelTasks.length > 0 ? Math.round((levelCompleted.length / levelTasks.length) * 100) : 0;
+      return { level, rate, count: levelTasks.length, completed: levelCompleted.length };
+    });
+
+    return (
+      <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4">
+        {/* 概要カード */}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-amber-50 dark:bg-amber-950/20 p-6 rounded-xl border border-amber-200 dark:border-amber-900 text-center">
+            <p className="text-amber-800 dark:text-amber-400 text-xs font-bold mb-1">累計獲得スター</p>
+            <p className="text-4xl font-black text-amber-600 dark:text-amber-500">
+              {totalStars} <span className="text-2xl">⭐️</span>
+            </p>
+          </div>
+          <div className="bg-emerald-50 dark:bg-emerald-950/20 p-6 rounded-xl border border-emerald-200 dark:border-emerald-900 text-center">
+            <p className="text-emerald-800 dark:text-emerald-400 text-xs font-bold mb-1">全体達成率</p>
+            <p className="text-4xl font-black text-emerald-600 dark:text-emerald-500">
+              {achievementRate}<span className="text-2xl">%</span>
+            </p>
+          </div>
+        </div>
+
+        {/* 重要度別の内訳 */}
+        <div className="bg-white dark:bg-zinc-900 p-6 rounded-xl border border-zinc-200 dark:border-zinc-800">
+          <h3 className="font-bold mb-4 text-sm text-zinc-500 uppercase tracking-wider">重要度別クリア率</h3>
+          <div className="space-y-5">
+            {importanceStats.map(stat => (
+              <div key={stat.level}>
+                <div className="flex justify-between text-sm mb-2">
+                  <span className="font-medium">{"⭐️".repeat(stat.level)}</span>
+                  <span className="font-mono text-zinc-500">
+                    {stat.completed} / {stat.count} ({stat.rate}%)
+                  </span>
+                </div>
+                <div className="w-full bg-zinc-100 dark:bg-zinc-800 h-2.5 rounded-full overflow-hidden">
+                  <div 
+                    className="bg-zinc-800 dark:bg-zinc-200 h-full transition-all duration-1000 ease-out" 
+                    style={{ width: `${stat.rate}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="text-center">
+          <p className="text-xs text-zinc-400">
+            全 {totalCount} 件のコミットに基づく統計データ
+          </p>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-zinc-50 p-8 dark:bg-black text-black dark:text-white font-sans">
@@ -180,68 +385,131 @@ export default function Home() {
           </div>
         </header>
 
-        <div className="bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900 rounded-xl p-6 text-center">
-          <h2 className="text-red-800 dark:text-red-400 font-bold text-sm mb-1">あなたが支払うべき罰金合計</h2>
-          <p className="text-4xl font-mono font-black text-red-600 dark:text-red-500">
-            ¥ {totalPenaltyAmount.toLocaleString()}
+        {/* サマリーカード: 罰金の代わりに「背負っている重要度スコア」を表示 */}
+        <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900 rounded-xl p-6 text-center">
+          <h2 className="text-amber-800 dark:text-amber-400 font-bold text-sm mb-1">未達成の重要度合計</h2>
+          <div className="flex items-center justify-center gap-2">
+            <p className="text-4xl font-mono font-black text-amber-600 dark:text-amber-500">
+              {totalImportanceScore}
+            </p>
+            <span className="text-2xl">⭐️</span>
+          </div>
+          <p className="text-xs text-amber-600/70 dark:text-amber-400/50 mt-2">
+            これだけの期待（重み）を背負っています
           </p>
         </div>
 
         <form onSubmit={addTask} className="flex flex-col gap-4 p-6 bg-white dark:bg-zinc-900 rounded-xl shadow-sm border border-zinc-200 dark:border-zinc-800">
           <div>
             <label className="block text-sm font-medium mb-1">達成する目標</label>
-            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="例: 毎日30分プログラミングする" className="w-full p-2 border rounded-md dark:bg-zinc-800 dark:border-zinc-700 outline-none focus:ring-2 focus:ring-black dark:focus:ring-white" />
+            <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} className="w-full p-2 border rounded-md dark:bg-zinc-800 dark:border-zinc-700" />
           </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">失敗時のペナルティ (¥)</label>
-            <input type="number" value={penalty} onChange={(e) => setPenalty(Number(e.target.value))} className="w-full p-2 border rounded-md dark:bg-zinc-800 dark:border-zinc-700 outline-none" />
+
+          <div className="flex gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-2">重要度を選択</label>
+              <div className="flex gap-2 mb-2">
+                {[1, 2, 3, 4, 5].map((num) => (
+                  <button
+                    key={num}
+                    type="button" // form送信を防ぐため必須
+                    onClick={() => setImportance(num)}
+                    className="text-2xl transition-transform active:scale-125"
+                  >
+                    <span className={num <= importance ? "grayscale-0" : "grayscale opacity-30"}>
+                      ⭐️
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <p className="text-xs text-zinc-500 font-medium">レベル {importance}: {
+                importance === 1 ? "ちょっとしたこと" :
+                importance === 3 ? "忘れてはいけない" :
+                importance === 5 ? "絶対に成し遂げる" : ""
+              }</p>
+            </div>
+            <div className="flex-1">
+              <label className="block text-sm font-medium mb-1">期限</label>
+              <input 
+                type="datetime-local" 
+                value={deadlineInput} 
+                onChange={(e) => setDeadlineInput(e.target.value)}
+                className="w-full p-2 border rounded-md dark:bg-zinc-800 dark:border-zinc-700"
+              />
+            </div>
           </div>
-          <button type="submit" className="bg-black dark:bg-white dark:text-black text-white p-2 rounded-md font-semibold hover:opacity-80 transition active:scale-95">タスクをコミットする</button>
+          
+          <button type="submit" className="bg-black dark:bg-white dark:text-black text-white p-2 rounded-md font-semibold hover:opacity-80 transition">
+            コミットする
+          </button>
         </form>
 
         <div className="space-y-4">
           <div className="flex gap-2 bg-zinc-200 dark:bg-zinc-800 p-1 rounded-lg w-fit">
             <button 
-              onClick={() => { setViewMode("personal"); setSelectedFilterUserId(null); }} 
-              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "personal" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
+              onClick={() => setViewMode("tasks")} 
+              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "tasks" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
             >
-              自分のタスク
+              タスク
             </button>
             <button 
-              onClick={() => setViewMode("global")} 
-              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "global" ? "bg-white dark:bg-zinc-600 shadow-sm" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
+              onClick={() => setViewMode("calendar")} 
+              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "calendar" ? "bg-white shadow-sm" : "text-zinc-500"}`}
             >
-              みんなのタスク
+              カレンダー
+            </button>
+            <button 
+              onClick={() => setViewMode("stats")} 
+              className={`px-4 py-2 text-sm font-bold rounded-md transition ${viewMode === "stats" ? "bg-white dark:bg-zinc-600 shadow-sm text-black dark:text-white" : "text-zinc-500 hover:text-black dark:hover:text-white"}`}
+            >
+              統計
             </button>
           </div>
 
           {/* ★新機能: ユーザー絞り込みフィルターUI（みんなのタスク選択時のみ表示） */}
-          {viewMode === "global" && activeUsers.length > 0 && (
+          
+          {viewMode === "tasks" && (
             <div className="flex gap-3 overflow-x-auto py-2 scrollbar-hide">
+              {/* 1. 全員表示ボタン */}
               <button
                 onClick={() => setSelectedFilterUserId(null)}
-                className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition border ${selectedFilterUserId === null ? "bg-black text-white dark:bg-white dark:text-black" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700"}`}
+                className={`flex-shrink-0 px-4 py-2 rounded-full text-xs font-bold border transition ${selectedFilterUserId === null ? "bg-black text-white dark:bg-white dark:text-black" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700"}`}
               >
-                全員表示
+                🌏 全員
               </button>
-              {activeUsers.map(u => (
+
+              {/* 2. 自分専用ボタン（固定） */}
+              <button
+                onClick={() => setSelectedFilterUserId(user.uid)}
+                className={`flex-shrink-0 px-4 py-2 rounded-full text-xs font-bold border transition ${selectedFilterUserId === user.uid ? "bg-blue-600 text-white border-blue-600" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700"}`}
+              >
+                👤 自分
+              </button>
+
+              {/* 3. 他のユーザーたち（自分以外をループ） */}
+              {activeUsers.filter(u => u.userId !== user.uid).map(u => (
                 <button
                   key={u.userId}
                   onClick={() => setSelectedFilterUserId(u.userId)}
-                  className={`flex items-center gap-1.5 flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-bold transition border ${selectedFilterUserId === u.userId ? "bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-300" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700"}`}
+                  className={`flex items-center gap-1.5 flex-shrink-0 px-4 py-2 rounded-full text-xs font-bold transition border ${selectedFilterUserId === u.userId ? "bg-blue-50 border-blue-200 text-blue-700 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-300" : "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700"}`}
                 >
                   {u.userPhoto ? (
                     <img src={u.userPhoto} alt="User" className="w-4 h-4 rounded-full" />
                   ) : (
                     <div className="w-4 h-4 rounded-full bg-zinc-300 dark:bg-zinc-700"></div>
                   )}
-                  {u.userName.split(" ")[0] /* 名前が長い場合は短縮 */}
+                  {u.userName.split(" ")[0]}
                 </button>
               ))}
             </div>
           )}
 
-          {displayTasks.length === 0 ? (
+          {/* 1. viewMode が calendar の時はカレンダーを表示 */}
+          {viewMode === "calendar" ? (
+            renderCalendarView()
+          ): viewMode === "stats" ? ( // ★追加
+            renderStatsView()
+          )  : (displayTasks.length === 0 ? (
             <p className="text-zinc-500 text-sm italic text-center py-8">
               {selectedFilterUserId ? "このユーザーのタスクはありません。" : "タスクはありません。"}
             </p>
@@ -267,8 +535,8 @@ export default function Home() {
                       <p className={`font-medium ${task.isCompleted ? "line-through text-zinc-500" : ""}`}>{task.title}</p>
                       
                       <div className="flex items-center gap-4 mt-2">
-                        <span className="text-sm font-mono font-bold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400 px-2 py-0.5 rounded">
-                          Penalty: ¥{task.penalty}
+                        <span className="text-sm font-bold bg-zinc-100 dark:bg-zinc-800 px-2 py-0.5 rounded text-zinc-600 dark:text-zinc-400">
+                          重要度: {"⭐️".repeat(task.importance)}
                         </span>
                         <span className={`text-sm font-mono ${statusInfo.color}`}>
                           {statusInfo.text}
@@ -287,26 +555,30 @@ export default function Home() {
                         <button onClick={() => toggleTask(task.id, task.isCompleted)} className="text-xs px-3 py-1.5 rounded-full border bg-green-500 border-green-500 text-white font-bold transition">✓ 完了</button>
                       )}
                       {isOwner && statusInfo.status === "failed" && (
-                        <button onClick={() => reportPayment(task.id)} className="text-xs px-3 py-1.5 rounded-full border bg-black text-white dark:bg-white dark:text-black font-bold transition hover:opacity-80">
-                          💰 支払いを報告
-                        </button>
-                      )}
+                        <div className="flex gap-2">
+                          {/* 再スケジュールボタン */}
+                          <button 
+                            onClick={() => rescheduleTask(task.id)} 
+                            className="text-xs px-3 py-1.5 rounded-full border bg-blue-600 text-white font-bold transition hover:bg-blue-700"
+                          >
+                            ⏳ 再スケジュール
+                          </button>
 
-                      {!isOwner && statusInfo.status === "pending" && (
-                        <button onClick={() => approvePayment(task.id)} className="text-xs px-4 py-2 rounded-full border bg-blue-600 border-blue-600 text-white font-bold transition hover:opacity-80 shadow-md">
-                          ✅ 支払いを承認する
-                        </button>
-                      )}
-                      
-                      {statusInfo.status === "paid" && (
-                        <span className="text-xs px-3 py-1.5 rounded-full font-bold bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 border border-green-200 dark:border-green-800">決済済</span>
+                          {/* キャンセルボタン */}
+                          <button 
+                            onClick={() => cancelTask(task.id)} 
+                            className="text-xs px-3 py-1.5 rounded-full border border-red-300 text-red-600 font-bold transition hover:bg-red-50"
+                          >
+                            ❌ キャンセル
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
                 );
               })}
             </div>
-          )}
+          ))}
         </div>
       </main>
     </div>
