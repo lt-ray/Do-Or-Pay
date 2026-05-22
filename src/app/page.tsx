@@ -22,6 +22,38 @@ type Task = {
   createdAt: number;
 };
 
+type NotificationPayload = {
+  action: "task-created" | "task-completed";
+  taskId: string;
+  title: string;
+  dueAt?: string;
+  createdBy?: string;
+  completedBy?: string;
+};
+
+async function sendNotification(payload: NotificationPayload) {
+  const url = process.env.NEXT_PUBLIC_NOTIFY_API_URL;
+  const secret = process.env.NEXT_PUBLIC_NOTIFY_SECRET;
+
+  if (!url || !secret) {
+    console.warn("通知設定が不足しています。");
+    return;
+  }
+
+  try {
+    await fetch(url, {
+      method: "POST",
+      mode: "no-cors",
+      body: JSON.stringify({
+        ...payload,
+        secret,
+      }),
+    });
+  } catch (error) {
+    console.error("通知送信エラー:", error);
+  }
+}
+
 export default function Home() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [globalTasks, setGlobalTasks] = useState<Task[]>([]);
@@ -81,35 +113,63 @@ export default function Home() {
   };
 
   const addTask = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!title || !user) return;
+  e.preventDefault();
+  if (!title || !user || !deadlineInput) return;
 
-    try {
-      await addDoc(collection(db, "tasks"), {
-        userId: user.uid,
-        userName: user.displayName || "匿名ユーザー",
-        userPhoto: user.photoURL || "",
-        title,
-        importance,
-        deadline: new Date(deadlineInput).getTime(), 
-        isCompleted: false,
-        paymentStatus: "unpaid",
-        createdAt: Date.now(),
-      });
-      setTitle("");
-    } catch (error) {
-      console.error("タスク追加エラー:", error);
-    }
-  };
+  try {
+    const deadlineTime = new Date(deadlineInput).getTime();
+    const dueAt = new Date(deadlineTime).toISOString();
 
-  const toggleTask = async (id: string, currentStatus: boolean) => {
-    const isNowCompleted = !currentStatus;
-    await updateDoc(doc(db, "tasks", id), { 
-      isCompleted: isNowCompleted,
-      // 完了した時は現在時刻を、未完了に戻した時は null をセット
-      completedAt: isNowCompleted ? Date.now() : null 
+    const docRef = await addDoc(collection(db, "tasks"), {
+      userId: user.uid,
+      userName: user.displayName || "匿名ユーザー",
+      userPhoto: user.photoURL || "",
+      title,
+      importance,
+      deadline: deadlineTime,
+      isCompleted: false,
+      paymentStatus: "unpaid",
+      createdAt: Date.now(),
     });
-  };
+
+    await sendNotification({
+      action: "task-created",
+      taskId: docRef.id,
+      title,
+      dueAt,
+      createdBy: user.displayName || user.email || "匿名ユーザー",
+    });
+
+    setTitle("");
+    setDeadlineInput("");
+  } catch (error) {
+    console.error("タスク追加エラー:", error);
+  }
+};
+
+  const toggleTask = async (task: Task) => {
+  const isNowCompleted = !task.isCompleted;
+
+  await updateDoc(doc(db, "tasks", task.id), {
+    isCompleted: isNowCompleted,
+    completedAt: isNowCompleted ? Date.now() : null,
+  });
+
+  if (isNowCompleted) {
+    const deadlineTime =
+      typeof task.deadline === "string"
+        ? new Date(task.deadline).getTime()
+        : task.deadline;
+
+    await sendNotification({
+      action: "task-completed",
+      taskId: task.id,
+      title: task.title,
+      dueAt: new Date(deadlineTime).toISOString(),
+      completedBy: user?.displayName || user?.email || "匿名ユーザー",
+    });
+  }
+};
 
   const deleteTask = async (id: string) => {
     await deleteDoc(doc(db, "tasks", id));
@@ -547,12 +607,12 @@ const displayTasks = (
                     <div className="flex gap-2">
                       {isOwner && statusInfo.status === "active" && (
                         <>
-                          <button onClick={() => toggleTask(task.id, task.isCompleted)} className="text-xs px-3 py-1.5 rounded-full border border-zinc-300 hover:bg-zinc-100 font-bold transition">完了にする</button>
+                          <button onClick={() => toggleTask(task)} className="text-xs px-3 py-1.5 rounded-full border border-zinc-300 hover:bg-zinc-100 font-bold transition">完了にする</button>
                           <button onClick={() => deleteTask(task.id)} className="text-xs px-2 py-1.5 text-zinc-400 hover:text-red-500 transition">削除</button>
                         </>
                       )}
                       {isOwner && statusInfo.status === "completed" && (
-                        <button onClick={() => toggleTask(task.id, task.isCompleted)} className="text-xs px-3 py-1.5 rounded-full border bg-green-500 border-green-500 text-white font-bold transition">✓ 完了</button>
+                        <button onClick={() => toggleTask(task)} className="text-xs px-3 py-1.5 rounded-full border bg-green-500 border-green-500 text-white font-bold transition">✓ 完了</button>
                       )}
                       {isOwner && statusInfo.status === "failed" && (
                         <div className="flex gap-2">
