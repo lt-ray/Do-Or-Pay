@@ -40,14 +40,25 @@ async function sendNotification(payload: NotificationPayload) {
     return;
   }
 
+  const payloadText = JSON.stringify({
+    ...payload,
+    secret,
+  });
+
+  const requestUrl = `${url}?${new URLSearchParams({
+    payload: payloadText,
+  }).toString()}`;
+
   try {
-    await fetch(url, {
-      method: "POST",
-      mode: "no-cors",
-      body: JSON.stringify({
-        ...payload,
-        secret,
-      }),
+    await new Promise<void>((resolve) => {
+      const img = new Image();
+
+      img.onload = () => resolve();
+      img.onerror = () => resolve();
+
+      img.src = requestUrl;
+
+      setTimeout(() => resolve(), 3000);
     });
   } catch (error) {
     console.error("通知送信エラー:", error);
