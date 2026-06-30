@@ -4,7 +4,6 @@
 
 Do-Or-Pay は，Firebase Authentication と Cloud Firestore を利用したタスク管理Webアプリです．  
 ユーザーはログイン後，自分のタスクを追加，表示，更新，削除できます．
-https://do-or-pay-eda39.web.app
 
 ## 主な機能
 
